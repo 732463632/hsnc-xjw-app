@@ -1,0 +1,26 @@
+# Gradle / Android
+.gradle/
+build/
+app/build/
+captures/
+.externalNativeBuild/
+.cxx/
+
+# 本机配置（含 SDK 绝对路径，不应提交）
+local.properties
+
+# IDE
+.idea/
+*.iml
+*.hprof
+
+# 签名文件
+*.jks
+*.keystore
+
+# 系统
+.DS_Store
+Thumbs.db
+
+# 调试产物
+*.log
