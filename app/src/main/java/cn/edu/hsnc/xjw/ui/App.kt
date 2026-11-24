@@ -54,9 +54,27 @@ fun AppRoot(startTab: Int = 0) {
     var data by remember { mutableStateOf<AppData?>(null) }
     var loggedIn by remember { mutableStateOf(api.hasSession()) }
     var loading by remember { mutableStateOf(false) }
+    var autoLogging by remember { mutableStateOf(!api.hasSession() && api.hasSavedCredential()) }
+    var autoFailMsg by remember { mutableStateOf<String?>(null) }
     var error by remember { mutableStateOf<String?>(null) }
     var tab by rememberSaveable { mutableStateOf(startTab.coerceIn(0, NAV_LABELS.size - 1)) }
     var banner by remember { mutableStateOf<String?>(null) }
+
+    fun applyData(d: AppData) {
+        data = d
+        if (d.gradeChange.hasChange) {
+            banner = d.gradeChange.summary +
+                d.gradeChange.items.take(2).joinToString("、", "：", "")
+        }
+        if (d.schedule == null) {
+            scope.launch {
+                runCatching {
+                    val s = withContext(Dispatchers.IO) { api.loadScheduleOnly() }
+                    data = d.copy(schedule = s)
+                }
+            }
+        }
+    }
 
     fun load() {
         if (loading) return
@@ -65,27 +83,42 @@ fun AppRoot(startTab: Int = 0) {
         scope.launch {
             try {
                 val d = withContext(Dispatchers.IO) { api.loadAll() }
-                data = d
-                if (d.gradeChange.hasChange) {
-                    banner = d.gradeChange.summary +
-                        d.gradeChange.items.take(2).joinToString("、", "：", "")
-                }
-                // 补上次要：课表没拉到时单独重试一次（考试为空是正常的，不重试）
-                if (d.schedule == null) {
-                    runCatching {
-                        val s = withContext(Dispatchers.IO) { api.loadScheduleOnly() }
-                        data = d.copy(schedule = s)
-                    }
-                }
+                applyData(d)
             } catch (e: SessionExpiredException) {
-                api.clearSession()
-                loggedIn = false
-                data = null
-                error = null
+                // 会话过期：尝试用保存的凭据静默重登一次
+                val ok = runCatching { withContext(Dispatchers.IO) { api.tryAutoLogin() } }.getOrDefault(false)
+                val d = if (ok) {
+                    runCatching { withContext(Dispatchers.IO) { api.loadAll() } }.getOrNull()
+                } else null
+                if (d != null) {
+                    applyData(d)
+                } else {
+                    api.clearSession()
+                    loggedIn = false
+                    data = null
+                    error = null
+                    autoFailMsg = api.lastAutoLoginMessage
+                        ?: "登录状态已过期，验证码已尽量帮你填好，核对后点登录即可"
+                }
             } catch (e: Exception) {
                 error = e.message ?: "网络异常"
             } finally {
                 loading = false
+            }
+        }
+    }
+
+    LaunchedEffect(Unit) {
+        if (autoLogging) {
+            val ok = runCatching { withContext(Dispatchers.IO) { api.tryAutoLogin() } }.getOrDefault(false)
+            autoLogging = false
+            if (ok) {
+                loggedIn = true
+            } else {
+                // 清掉过期会话，下次启动才会重新走一遍自动登录
+                api.clearSession()
+                autoFailMsg = api.lastAutoLoginMessage
+                    ?: "自动登录未成功，验证码已尽量帮你填好，核对后点登录即可"
             }
         }
     }
@@ -95,8 +128,21 @@ fun AppRoot(startTab: Int = 0) {
     }
 
     when {
-        !loggedIn -> LoginScreen(api) {
+        autoLogging -> Column(
+            Modifier
+                .fillMaxSize()
+                .background(Bg),
+            verticalArrangement = Arrangement.Center,
+            horizontalAlignment = Alignment.CenterHorizontally
+        ) {
+            CircularProgressIndicator(color = Accent, strokeWidth = 2.dp, modifier = Modifier.size(24.dp))
+            Spacer(Modifier.height(14.dp))
+            Text("正在自动登录…", color = TextSub, fontSize = 12.sp)
+        }
+
+        !loggedIn -> LoginScreen(api, autoFailMsg) {
             loggedIn = true
+            autoFailMsg = null
             data = null
             error = null
             tab = 0
@@ -111,6 +157,7 @@ fun AppRoot(startTab: Int = 0) {
         ) {
             ErrorScreen(error!!, onRetry = { load() }, onLogout = {
                 api.clearSession()
+                api.forgetCredential()
                 loggedIn = false
                 data = null
                 error = null
@@ -135,6 +182,7 @@ fun AppRoot(startTab: Int = 0) {
             onRefresh = { load() },
             onLogout = {
                 api.clearSession()
+                api.forgetCredential()
                 loggedIn = false
                 data = null
                 error = null
